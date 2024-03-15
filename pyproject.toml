@@ -28,9 +28,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "torch",
-    "torchvision",
-    "torchaudio",
+
 ]
 
 [project.optional-dependencies]
@@ -39,6 +37,7 @@ dev = [
     "ipython",
     "pre-commit",
     "ruff",
+    "yourdfpy"  # yourdfpy <path/to/urdf> to viz urdf
 ]
 
 [project.urls]
