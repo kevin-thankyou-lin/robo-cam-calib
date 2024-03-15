@@ -17,6 +17,26 @@ from viser.extras import ViserUrdf
 # Other necessary imports
 
 
+def realSenseThread(stop_event: Event, viser_server):
+    with realsense_pipeline() as pipeline:
+        while not stop_event.is_set():
+            frames = pipeline.wait_for_frames()
+            depth_frame = frames.get_depth_frame()
+            color_frame = frames.get_color_frame()
+
+            positions, colors = point_cloud_arrays_from_frames(depth_frame, color_frame)
+
+            # Transformation and visualization logic here
+            # Apply any necessary transformations to positions
+            R = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]], dtype=np.float32)
+            positions = positions @ R.T
+
+            # Visualize point cloud with viser server
+            viser_server.add_point_cloud("/realsense", points=positions, colors=colors, point_size=0.001)
+
+            # Example sleep, adjust as necessary. You might not need this if wait_for_frames is blocking and paced by frame arrival.
+            time.sleep(0.1)
+
 @contextlib.contextmanager
 def realsense_pipeline(fps: int = 30):
     """Context manager that yields a RealSense pipeline."""
@@ -38,25 +58,6 @@ def realsense_pipeline(fps: int = 30):
 
     # Close pipeline when done.
     pipeline.stop()
-
-def get_newest_joint_angles() -> List[float]:
-    # Implement logic to fetch or calculate the newest joint angles.
-    # This is a placeholder function.
-    # return onp.random.uniform(-onp.pi, onp.pi, size=8).tolist()
-    return onp.zeros(8).tolist()
-
-def update_joint_angles(urdf: ViserUrdf, gui_joints: List[viser.GuiInputHandle[float]]):
-    newest_angles = get_newest_joint_angles()
-    for gui, new_angle in zip(gui_joints, newest_angles):
-        gui.value = new_angle
-    urdf.update_cfg(onp.array(newest_angles))
-
-def continuous_update(urdf: ViserUrdf, gui_joints: List[viser.GuiInputHandle[float]], frequency: float):
-    interval = 1.0 / frequency
-    while True:
-        update_joint_angles(urdf, gui_joints)
-        time.sleep(interval)
-
 
 def point_cloud_arrays_from_frames(
     depth_frame, color_frame
@@ -109,25 +110,23 @@ def point_cloud_arrays_from_frames(
 
     return positions, colors
 
-def realSenseThread(stop_event: Event, viser_server):
-    with realsense_pipeline() as pipeline:
-        while not stop_event.is_set():
-            frames = pipeline.wait_for_frames()
-            depth_frame = frames.get_depth_frame()
-            color_frame = frames.get_color_frame()
+def get_newest_joint_angles() -> List[float]:
+    # Implement logic to fetch or calculate the newest joint angles.
+    # This is a placeholder function.
+    # return onp.random.uniform(-onp.pi, onp.pi, size=8).tolist()
+    return onp.zeros(8).tolist()
 
-            positions, colors = point_cloud_arrays_from_frames(depth_frame, color_frame)
+def update_joint_angles(urdf: ViserUrdf, gui_joints: List[viser.GuiInputHandle[float]]):
+    newest_angles = get_newest_joint_angles()
+    for gui, new_angle in zip(gui_joints, newest_angles):
+        gui.value = new_angle
+    urdf.update_cfg(onp.array(newest_angles))
 
-            # Transformation and visualization logic here
-            # Apply any necessary transformations to positions
-            R = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]], dtype=np.float32)
-            positions = positions @ R.T
-
-            # Visualize point cloud with viser server
-            viser_server.add_point_cloud("/realsense", points=positions, colors=colors, point_size=0.001)
-
-            # Example sleep, adjust as necessary. You might not need this if wait_for_frames is blocking and paced by frame arrival.
-            time.sleep(0.1)
+def robot_update(urdf: ViserUrdf, gui_joints: List[viser.GuiInputHandle[float]], frequency: float):
+    interval = 1.0 / frequency
+    while True:
+        update_joint_angles(urdf, gui_joints)
+        time.sleep(interval)
 
 def initialize_robot(viser_server, urdf_path: Path):
     urdf = ViserUrdf(viser_server, urdf_path)
@@ -178,8 +177,8 @@ def main(urdf_path: Path) -> None:
     gui_joints, urdf = initialize_robot(viser_server, urdf_path)
 
     # Start continuous update thread at 60Hz
-    updater_thread = Thread(target=continuous_update, args=(urdf, gui_joints, 60.0), daemon=True)
-    updater_thread.start()
+    robot_updater_thread = Thread(target=robot_update, args=(urdf, gui_joints, 60.0), daemon=True)
+    robot_updater_thread.start()
 
     try:
         while True:
@@ -187,7 +186,7 @@ def main(urdf_path: Path) -> None:
     except KeyboardInterrupt:
         stop_event.set()  # Signal the RealSense thread to stop
         rs_thread.join()  # Wait for the RealSense thread to finish
-        updater_thread.join()
+        robot_updater_thread.join()
 
     print("Done.")
 
