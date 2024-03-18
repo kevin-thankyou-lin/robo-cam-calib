@@ -6,18 +6,104 @@ from pathlib import Path
 from threading import Event, Thread
 from typing import List, Tuple
 
+import kinpy as kp
 import numpy as np
 import numpy as onp
 import numpy.typing as npt
 import pyrealsense2 as rs  # type: ignore
 import tyro
 import viser
+from kortex_api.autogen.client_stubs.BaseCyclicClientRpc import BaseCyclicClient
+from scipy.spatial.transform import Rotation
 from viser.extras import ViserUrdf
 
-# Other necessary imports
+from robo_cam_calib.utils.kinova_utils import DeviceConnection
 
 
-def realSenseThread(stop_event: Event, viser_server):
+def transform_to_matrix(transform):
+    """Converts a transform object to a 4x4 transformation matrix."""
+    from scipy.spatial.transform import Rotation
+    res = np.eye(4)
+    quat_wxyz = transform.rot
+    quat_xyzw = [quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]]
+    rotation = Rotation.from_quat(np.array(quat_xyzw)).as_matrix()
+    position = np.array(transform.pos)
+    res[:3, :3] = rotation
+    res[:3, 3] = position
+    return res
+
+class RobotController:
+    def __init__(self):
+        self.connection = None
+        self.base_cyclic = None
+        self.urdf_file = "assets/kortex_description/robots/gen3_robotiq_2f_85.urdf"
+        self.chain = kp.build_chain_from_urdf(open(self.urdf_file).read())
+
+
+    def connect_to_robot(self):
+        device_connection = DeviceConnection(DeviceConnection.IP, port=DeviceConnection.TCP_PORT, credentials=(DeviceConnection.USERNAME, DeviceConnection.PASSWORD))
+        router = device_connection.connect()
+        self.base_cyclic = BaseCyclicClient(router)
+
+    def get_newest_joint_angles(self, pad_gripper: bool = False, radians: bool = True) -> List[float]:
+        if not self.base_cyclic:
+            raise Exception("Not connected to the robot")
+        feedback = self.base_cyclic.RefreshFeedback()
+        joint_angles_deg = [actuator.position for actuator in feedback.actuators] + ([0.0] if pad_gripper else [])
+
+        if radians:
+            joint_angles_rad = [angle * onp.pi / 180 for angle in joint_angles_deg]
+            return joint_angles_rad
+
+        return joint_angles_deg
+
+    def disconnect_from_robot(self):
+        if self.connection:
+            self.connection.disconnect()
+            self.connection = None
+
+    def get_camera_pose(self, ret_as_transf: bool = False) -> np.ndarray:
+        # Get the camera pose using the robot's FK
+        newest_joint_angles = self.get_newest_joint_angles(pad_gripper=False, radians=True)
+        # pad to thirteen joints from current 7
+        newest_joint_angles += [0.0] * 6
+        out = self.chain.forward_kinematics(th=newest_joint_angles)['camera_depth_frame']
+        if ret_as_transf:
+            return out
+        # convert from Transform to 4x4 matrix
+        return transform_to_matrix(out)
+
+
+def adjust_camera_orientation(pose_matrix):
+    """
+    Flip camera orientation while maintaining position.
+    So the desired new x-axis is direction of negative of old z-axis,
+    the desired new y-axis is direction of negative old y-axis
+    the desired new z-axis is direction of negative old x-axis
+    """
+
+    t_opengl = pose_matrix[:3, 3]
+
+    x_old = pose_matrix[:3, 0]
+    y_old = pose_matrix[:3, 1]
+    z_old = pose_matrix[:3, 2]
+
+    # Compute the new axes directions
+    x_new = -z_old  # New x-axis is the negative of the old z-axis
+    y_new = -y_old  # New y-axis is the negative of the old y-axis
+    z_new = -x_old  # New z-axis is the negative of the old x-axis
+
+    # Construct the new rotation matrix
+    R_opencv = np.column_stack((x_new, y_new, z_new))
+
+    # Rebuild the pose matrix with adjusted orientation and original position
+    pose_matrix_opencv = np.eye(4)
+    pose_matrix_opencv[:3, :3] = R_opencv
+    pose_matrix_opencv[:3, 3] = t_opengl
+    return pose_matrix_opencv
+
+
+def realSenseThread(stop_event: Event, viser_server, robot_controller: RobotController):
     with realsense_pipeline() as pipeline:
         while not stop_event.is_set():
             frames = pipeline.wait_for_frames()
@@ -26,10 +112,31 @@ def realSenseThread(stop_event: Event, viser_server):
 
             positions, colors = point_cloud_arrays_from_frames(depth_frame, color_frame)
 
-            # Transformation and visualization logic here
-            # Apply any necessary transformations to positions
-            R = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]], dtype=np.float32)
-            positions = positions @ R.T
+            # apply camera_pose transformation to positions
+            camera_pose = robot_controller.get_camera_pose()
+            camera_pose = adjust_camera_orientation(camera_pose)
+
+            # plot camera pose in viser
+            camera_pos = camera_pose[:3, 3]
+            camera_rot = camera_pose[:3, :3]
+            camera_xyzw = Rotation.from_matrix(camera_rot).as_quat()
+            camera_wxyz = np.array([camera_xyzw[-1], camera_xyzw[0], camera_xyzw[1], camera_xyzw[2]])
+
+            # add camera pose frame
+            viser_server.add_frame(
+                "/camera",
+                wxyz=camera_wxyz,
+                position=camera_pos,
+                axes_length=0.1,
+                axes_radius=0.0025,
+            )
+
+            # first convert to opencv coord
+            positions[:, 1] *= 1
+            positions[:, 2] *= -1
+
+            positions = camera_pose @ np.concatenate([positions, np.ones((positions.shape[0], 1))], axis=1).T
+            positions = positions[:3, :].T
 
             # Visualize point cloud with viser server
             viser_server.add_point_cloud("/realsense", points=positions, colors=colors, point_size=0.001)
@@ -110,22 +217,18 @@ def point_cloud_arrays_from_frames(
 
     return positions, colors
 
-def get_newest_joint_angles() -> List[float]:
-    # Implement logic to fetch or calculate the newest joint angles.
-    # This is a placeholder function.
-    # return onp.random.uniform(-onp.pi, onp.pi, size=8).tolist()
-    return onp.zeros(8).tolist()
 
-def update_joint_angles(urdf: ViserUrdf, gui_joints: List[viser.GuiInputHandle[float]]):
-    newest_angles = get_newest_joint_angles()
+def update_joint_angles(urdf: ViserUrdf, gui_joints: List[viser.GuiInputHandle[float]], robot_controller):
+    newest_angles = robot_controller.get_newest_joint_angles(pad_gripper=True, radians=True)
+    print(f"newest_angles: {newest_angles}")
     for gui, new_angle in zip(gui_joints, newest_angles):
         gui.value = new_angle
     urdf.update_cfg(onp.array(newest_angles))
 
-def robot_update(urdf: ViserUrdf, gui_joints: List[viser.GuiInputHandle[float]], frequency: float):
+def robot_update(urdf: ViserUrdf, gui_joints: List[viser.GuiInputHandle[float]], frequency: float, robot_controller):
     interval = 1.0 / frequency
     while True:
-        update_joint_angles(urdf, gui_joints)
+        update_joint_angles(urdf, gui_joints, robot_controller)
         time.sleep(interval)
 
 def initialize_robot(viser_server, urdf_path: Path):
@@ -166,18 +269,21 @@ def initialize_robot(viser_server, urdf_path: Path):
 
     return gui_joints, urdf
 
+
 # Use in main or another appropriate function
 def main(urdf_path: Path) -> None:
     viser_server = viser.ViserServer()
+    robot_controller = RobotController()
+    robot_controller.connect_to_robot()
 
     stop_event = Event()
-    rs_thread = Thread(target=realSenseThread, args=(stop_event, viser_server))
+    rs_thread = Thread(target=realSenseThread, args=(stop_event, viser_server, robot_controller))
     rs_thread.start()
 
     gui_joints, urdf = initialize_robot(viser_server, urdf_path)
 
     # Start continuous update thread at 60Hz
-    robot_updater_thread = Thread(target=robot_update, args=(urdf, gui_joints, 60.0), daemon=True)
+    robot_updater_thread = Thread(target=robot_update, args=(urdf, gui_joints, 60.0, robot_controller), daemon=True)
     robot_updater_thread.start()
 
     try:
@@ -188,6 +294,7 @@ def main(urdf_path: Path) -> None:
         rs_thread.join()  # Wait for the RealSense thread to finish
         robot_updater_thread.join()
 
+    robot_controller.disconnect_from_robot()
     print("Done.")
 
 if __name__ == "__main__":
