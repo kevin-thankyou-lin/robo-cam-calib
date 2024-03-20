@@ -62,14 +62,12 @@ class RobotController:
             self.connection.disconnect()
             self.connection = None
 
-    def get_camera_pose(self, ret_as_transf: bool = False) -> np.ndarray:
+    def get_camera_pose(self) -> np.ndarray:
         # Get the camera pose using the robot's FK
         newest_joint_angles = self.get_newest_joint_angles(pad_gripper=False, radians=True)
         # pad to thirteen joints from current 7
         newest_joint_angles += [0.0] * 6
         out = self.chain.forward_kinematics(th=newest_joint_angles)['camera_depth_frame']
-        if ret_as_transf:
-            return out
         # convert from Transform to 4x4 matrix
         return transform_to_matrix(out)
 
@@ -80,6 +78,8 @@ def adjust_camera_orientation(pose_matrix):
     So the desired new x-axis is direction of negative of old z-axis,
     the desired new y-axis is direction of negative old y-axis
     the desired new z-axis is direction of negative old x-axis
+
+    TODO(klin): update camera_calibration.json (19/03/24) to automatically use adjusted orientation
     """
 
     t_opengl = pose_matrix[:3, 3]
