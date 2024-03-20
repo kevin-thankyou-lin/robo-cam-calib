@@ -89,7 +89,7 @@ def adjust_camera_orientation(pose_matrix):
     z_old = pose_matrix[:3, 2]
 
     # Compute the new axes directions
-    x_new = -z_old  # New x-axis is the negative of the old z-axis
+    x_new = z_old  # New x-axis is the negative of the old z-axis
     y_new = -y_old  # New y-axis is the negative of the old y-axis
     z_new = -x_old  # New z-axis is the negative of the old x-axis
 
@@ -139,7 +139,7 @@ def realSenseThread(stop_event: Event, viser_server, robot_controller: RobotCont
             positions = positions[:3, :].T
 
             # Visualize point cloud with viser server
-            viser_server.add_point_cloud("/realsense", points=positions, colors=colors, point_size=0.001)
+            viser_server.add_point_cloud("/realsense", points=positions, colors=colors, point_size=0.003)
 
             # Example sleep, adjust as necessary. You might not need this if wait_for_frames is blocking and paced by frame arrival.
             time.sleep(0.1)
